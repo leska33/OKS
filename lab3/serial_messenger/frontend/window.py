@@ -161,7 +161,7 @@ class SerialMessenger(QtWidgets.QWidget):
         self.baud_rate_choice.setCurrentIndex(-1)
         self.baud_rate_choice.setEnabled(False)
 
-        # ЛР3: вкл/выкл эмуляции ошибок (вероятность 10 % — вариант 1, в UI не дублируем).
+        # ЛР3 вариант 1: эмуляция одиночной ошибки с вероятностью 10 %.
         self.error_emulation_checkbox = QtWidgets.QCheckBox("Enable")
         self.error_emulation_checkbox.setChecked(False)
 
@@ -232,6 +232,7 @@ class SerialMessenger(QtWidgets.QWidget):
         # обмен, нижняя — диагностику сформированных пакетов.
         emulate_box, emulate_layout = self._section("Error emulation")
         emulate_layout.addWidget(self.error_emulation_checkbox)
+        emulate_box.setMinimumWidth(160)
 
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(port_box)
