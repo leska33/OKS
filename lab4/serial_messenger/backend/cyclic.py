@@ -1,5 +1,3 @@
-"""Циклический код (ЛР3). FCS_BITS=10: 2^10>=632+10+1; FCS_BYTES=2; g(x)=x^10+x^3+1."""
-
 from __future__ import annotations
 
 from typing import Final

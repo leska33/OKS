@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from contextlib import ExitStack
@@ -124,11 +123,11 @@ class SerialMessenger(QtWidgets.QWidget):
         self.baud_rate_choice.setCurrentIndex(-1)
         self.baud_rate_choice.setEnabled(False)
 
-        # ЛР3: разрешение/запрет эмуляции ошибок не затрагивает окна Input/Output.
+                                                                                  
         self.error_emulation_checkbox = QtWidgets.QCheckBox("Enable")
         self.error_emulation_checkbox.setChecked(False)
 
-        # ЛР4: разрешение/запрет эмуляции множественного доступа (CSMA/CD).
+                                                                           
         self.multiple_access_checkbox = QtWidgets.QCheckBox("Enable")
         self.multiple_access_checkbox.setChecked(False)
 
@@ -170,10 +169,30 @@ class SerialMessenger(QtWidgets.QWidget):
         self.sent_characters_label = QtWidgets.QLabel()
         self.sent_characters_label.setObjectName("stateLabel")
 
-        # ЛР4: динамика коллизий последнего кадра — «*», разделённые пробелами.
+                                                                                 
         self.collisions_label = QtWidgets.QLabel("")
         self.collisions_label.setObjectName("collisionsLabel")
         self.collisions_label.setWordWrap(True)
+        self.collisions_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop
+        )
+        self.collisions_label.setMinimumWidth(72)
+        self.collisions_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.NoTextInteraction
+        )
+
+        self.collisions_scroll = QtWidgets.QScrollArea()
+        self.collisions_scroll.setObjectName("collisionsScroll")
+        self.collisions_scroll.setWidget(self.collisions_label)
+        self.collisions_scroll.setWidgetResizable(True)
+        self.collisions_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.collisions_scroll.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.collisions_scroll.setFixedHeight(34)
+        self.collisions_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
 
     def _create_layout(self) -> None:
         layout = QtWidgets.QGridLayout(self)
@@ -191,10 +210,16 @@ class SerialMessenger(QtWidgets.QWidget):
         emulate_layout.addWidget(self.error_emulation_checkbox)
         emulate_box.setMinimumWidth(150)
 
-        # ЛР4: отдельный блок управления эмуляцией множественного доступа.
+                                                                          
         access_box, access_layout = self._section("Multiple access")
         access_layout.addWidget(self.multiple_access_checkbox)
         access_box.setMinimumWidth(150)
+
+                                                                                        
+        collisions_box, collisions_layout = self._section("Collisions")
+        collisions_layout.addWidget(self.collisions_scroll)
+        collisions_box.setMinimumWidth(110)
+        collisions_box.setMaximumWidth(180)
 
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(port_box)
@@ -202,6 +227,7 @@ class SerialMessenger(QtWidgets.QWidget):
         controls.addWidget(emulate_box)
         controls.addWidget(access_box)
         controls.addStretch()
+        controls.addWidget(collisions_box)
         layout.addLayout(controls, 0, 0, 1, 2)
 
         outgoing, outgoing_layout = self._section("Input")
@@ -215,8 +241,6 @@ class SerialMessenger(QtWidgets.QWidget):
         state, state_layout = self._section("Status")
         state_layout.addWidget(self.field_names_label)
         state_layout.addWidget(self.status_area)
-        # Коллизии — отдельно от полей кадра (треб. 6 методички ЛР4).
-        state_layout.addWidget(self.collisions_label)
         layout.addWidget(state, 2, 0, 1, 2)
         layout.addWidget(self.sent_characters_label, 3, 0, 1, 2)
 
@@ -339,12 +363,12 @@ class SerialMessenger(QtWidgets.QWidget):
         self.input_area.setFocus()
 
     def _toggle_error_emulation(self, enabled: bool) -> None:
-        """Передать в соединение флаг эмуляции ошибок (вариант 1 — 10 %)."""
+                                                                            
         if self.connection is not None:
             self.connection.set_emulate_errors(enabled)
 
     def _toggle_multiple_access(self, enabled: bool) -> None:
-        """Разрешить/запретить эмуляцию множественного доступа (ЛР4, вариант 1)."""
+                                                                                   
         if self.connection is not None:
             self.connection.set_emulate_multiple_access(enabled)
 
@@ -395,8 +419,8 @@ class SerialMessenger(QtWidgets.QWidget):
         *,
         update_collisions: bool = True,
     ) -> None:
-        """Показать последний кадр: до stuffing, после stuffing, после эмуляции ошибки."""
-        # 1) до бит-стаффинга, 2) после него, 3) после эмуляции ошибки
+                                                                                          
+                                                                      
         self.status_area.setHtml(
             "<div style='font-family: Consolas, monospace; font-size: 12px; "
             "line-height: 1.35;'>"
@@ -405,10 +429,10 @@ class SerialMessenger(QtWidgets.QWidget):
             f"{transmission.after_error_html}"
             "</div>"
         )
-        # При эмуляции прокрутить к третьей строке — там подчёркнутый байт.
+                                                                           
         bar = self.status_area.verticalScrollBar()
         bar.setValue(bar.maximum())
-        # ЛР4: коллизии последнего кадра — последовательно, через пробел.
+                                                                         
         if update_collisions:
             self.collisions_label.setText(transmission.collisions_display)
 
@@ -552,6 +576,17 @@ class SerialMessenger(QtWidgets.QWidget):
                 border: 1px solid #303030;
                 padding: 4px;
                 selection-background-color: #9bbcff;
+            }
+
+            QScrollArea#collisionsScroll {
+                background: white;
+                border: 1px solid #a8a8a8;
+            }
+
+            QLabel#collisionsLabel {
+                background: white;
+                padding: 4px 6px;
+                font: 14px 'Consolas', 'Courier New', monospace;
             }
 
             """)

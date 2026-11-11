@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import random
@@ -17,7 +16,7 @@ MAX_DATA_SIZE: Final[int] = (
 )
 BODY_SIZE: Final[int] = MAX_FRAME_SIZE - len(START_FLAG)
 
-# Вариант 1 ЛР3: вероятность эмуляции ошибки 10 %.
+                                                  
 ERROR_PROBABILITY: Final[float] = 0.10
 
 def _bits_of_byte(value: int) -> Iterable[int]:
@@ -89,7 +88,7 @@ def _format_field(field: bytes) -> str:
     return ",".join(_binary_byte(value) for value in field)
 
 def _format_field_with_diff(original: bytes, current: bytes) -> str:
-    """Двоичное поле; подчёркнут только изменённый бит (эмуляция ошибки)."""
+                                                                            
     parts: list[str] = []
     for old_byte, new_byte in zip(original, current, strict=True):
         view: list[str] = []
@@ -160,7 +159,7 @@ class FrameTransmission:
     after_html: str
     after_error_html: str
     error_emulated: bool = False
-    # ЛР4: коллизии последнего кадра — символы «*», разделённые пробелами.
+                                                                          
     collisions_display: str = ""
 
 def _stuff_body(fields: tuple[bytes, ...]) -> tuple[bytes, list[str]]:
@@ -204,13 +203,13 @@ def encode_frame(
     *,
     emulate_errors: bool = False,
 ) -> FrameTransmission:
-    """Собрать кадр с FCS, при необходимости исказить данные, затем сделать stuffing.
-
-    Порядок по заданию ЛР3:
-    1) заполнить FCS по полю данных;
-    2) бит-стаффинг применять к кадру с уже заполненным FCS;
-    3) эмуляция ошибки — один бит одного байта поля данных перед передачей.
-    """
+\
+\
+\
+\
+\
+\
+       
     data = text if isinstance(text, bytes) else text.encode("utf-8")
     padded = data.ljust(MAX_DATA_SIZE, b"\x00") if len(data) < MAX_DATA_SIZE else data
     if len(padded) > MAX_DATA_SIZE:
@@ -227,13 +226,13 @@ def encode_frame(
     )
 
     before = _visible_status(START_FLAG, clean_fields)
-    # Строка Status «после stuffing»: кадр с корректным FCS (ещё без эмуляции).
+                                                                               
     _clean_stuffed, clean_displayed = _stuff_body(clean_fields)
     after = _visible_status(START_FLAG, clean_fields, clean_displayed)
 
     error_emulated = False
     send_fields = clean_fields
-    # Эмуляция — непосредственно перед передачей: после FCS, порча Data, затем stuffing.
+                                                                                        
     if emulate_errors and random.random() < ERROR_PROBABILITY:
         corrupted_data, _byte_index, _bit_index = _corrupt_data_field(padded)
         send_fields = (
@@ -244,7 +243,7 @@ def encode_frame(
             reserved,
         )
         error_emulated = True
-        # 3-я строка Status: содержимое после эмуляции (до stuffing), байт с ошибкой подчёркнут.
+                                                                                                
         after_error = " ".join(
             (
                 _format_field(START_FLAG),
@@ -256,7 +255,7 @@ def encode_frame(
         )
         stuffed_body, _ = _stuff_body(send_fields)
     else:
-        # Без эмуляции третья строка совпадает с содержимым до stuffing.
+                                                                        
         after_error = before
         stuffed_body = _clean_stuffed
 
@@ -272,6 +271,8 @@ class FrameDecoder:
 
     def __init__(self) -> None:
         self._source = bytearray()
+                                                                            
+        self.jam_events = 0
 
     def feed(self, received: bytes) -> list[Frame]:
         self._source.extend(received)
@@ -280,29 +281,33 @@ class FrameDecoder:
         while True:
             flag_offset = self._source.find(START_FLAG)
             if flag_offset < 0:
-                # Нет флага: Jam в мусоре сбрасываем, иначе оставляем хвост-префикс.
+                                                                                    
                 jam_at = contains_jam(self._source)
                 if jam_at >= 0:
+                                                                  
+                    self.jam_events += 1
                     del self._source[: jam_at + len(JAM_SIGNAL)]
                     continue
                 self._keep_possible_flag_prefix()
                 return ready
             if flag_offset:
-                # Всё до флага (в т.ч. Jam) отбрасываем как шум линии.
+                                                                      
                 del self._source[:flag_offset]
 
-            # ЛР4: Jam после флага отравляет текущую сборку (коллизия по байту).
+                                                                                
             jam_at = contains_jam(self._source)
             decoded = self._decode_one(memoryview(self._source)[len(START_FLAG) :])
             if jam_at >= len(START_FLAG):
                 if decoded is not None:
                     frame, wire_bytes = decoded
                     frame_end = len(START_FLAG) + wire_bytes
-                    # Целый кадр успел закончиться до Jam — принимаем его.
+                                                                          
                     if frame is not None and jam_at >= frame_end:
                         ready.append(frame)
                         del self._source[:frame_end]
                         continue
+                                                                    
+                self.jam_events += 1
                 del self._source[: jam_at + len(JAM_SIGNAL)]
                 continue
 

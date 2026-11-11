@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import sys
@@ -12,7 +11,13 @@ from PyQt6 import QtCore
 from serial import Serial, SerialException, SerialTimeoutException
 from serial.tools import list_ports
 
-from .csma_cd import transmit_frame_csma_cd
+from .csma_cd import (
+    backoff_delay_ms,
+    is_channel_busy,
+    listen_until_idle,
+    transmit_frame_csma_cd,
+    wait_ms,
+)
 from .frame import MAX_DATA_SIZE, FrameDecoder, FrameTransmission, encode_frame
 
 __all__ = ("BAUD_RATES", "SerialConnection")
@@ -63,10 +68,11 @@ class ReceiverThread(QtCore.QThread):
     data_received = QtCore.pyqtSignal(object)
     error_occurred = QtCore.pyqtSignal(str)
 
-    def __init__(self, port: Serial) -> None:
+    def __init__(self, port: Serial, owner: SerialConnection) -> None:
         super().__init__()
 
         self.port = port
+        self._owner = owner
         self._active = True
 
     @override
@@ -78,12 +84,29 @@ class ReceiverThread(QtCore.QThread):
                 if not self.port.is_open:
                     return
 
+                                                                
+                                                                     
+                if self._owner.emulate_multiple_access and is_channel_busy():
+                    listen_until_idle()
+                    if not self._active:
+                        return
+
                 waiting = self.port.in_waiting
 
                 if waiting:
                     raw_data = self.port.read(waiting)
+                    jam_before = decoder.jam_events
+                    frames = decoder.feed(raw_data)
+                    jam_count = decoder.jam_events - jam_before
 
-                    for frame in decoder.feed(raw_data):
+                                                                                     
+                    if jam_count and self._owner.emulate_multiple_access:
+                        for attempt in range(1, jam_count + 1):
+                            wait_ms(backoff_delay_ms(attempt))
+                            if not self._active:
+                                return
+
+                    for frame in frames:
                         self.data_received.emit(frame)
 
                 else:
@@ -127,9 +150,9 @@ class SerialConnection(QtCore.QObject):
         self.receiver: ReceiverThread | None = None
         self._tx_buffer = bytearray()
         self._tx_characters = 0
-        # ЛР3: эмуляция одиночной ошибки в поле данных (вероятность — по варианту).
+                                                                                   
         self.emulate_errors = False
-        # ЛР4: эмуляция множественного доступа к моноканалу (CSMA/CD, вариант 1).
+                                                                                 
         self.emulate_multiple_access = False
         self._sending = False
 
@@ -215,7 +238,7 @@ class SerialConnection(QtCore.QObject):
                 f"Could not open {self.port_name}: {detail}{hint}"
             ) from last_error
 
-        self.receiver = ReceiverThread(self.port)
+        self.receiver = ReceiverThread(self.port, self)
 
         self.receiver.data_received.connect(self._handle_frame)
 
@@ -285,11 +308,11 @@ class SerialConnection(QtCore.QObject):
             return None
 
     def set_emulate_errors(self, enabled: bool) -> None:
-        """Разрешить или запретить эмуляцию ошибок перед передачей кадра."""
+                                                                            
         self.emulate_errors = enabled
 
     def set_emulate_multiple_access(self, enabled: bool) -> None:
-        """Разрешить или запретить эмуляцию множественного доступа (ЛР4)."""
+                                                                            
         self.emulate_multiple_access = enabled
 
     def _send_full_packet(self) -> FrameTransmission | None:
@@ -311,7 +334,7 @@ class SerialConnection(QtCore.QObject):
             emulate_errors=self.emulate_errors,
         )
         if self.emulate_multiple_access:
-            # ЛР4: listen → коллизия по байту → jam + backoff (без распараллеливания).
+                                                                                      
             port = self.port
 
             def _write(chunk: bytes) -> int:
@@ -327,7 +350,7 @@ class SerialConnection(QtCore.QObject):
                     "CSMA/CD: кадр не передан после повторных коллизий "
                     f"(попыток: {result.attempts})."
                 )
-                # Коллизии последнего кадра всё равно показываем в Status.
+                                                                              
                 self.frame_sent.emit(transmission)
                 self._tx_buffer.clear()
                 self._tx_characters = 0
