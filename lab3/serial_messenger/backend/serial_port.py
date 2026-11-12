@@ -152,7 +152,7 @@ class SerialConnection(QtCore.QObject):
         # Символы копятся и уходят на линию только когда поле заполнено.
         self._tx_buffer = bytearray()
         self._tx_characters = 0
-        # ЛР3: эмуляция одиночной ошибки в поле данных (вероятность — по варианту).
+        # ЛР3: эмуляция одиночной ошибки после bit-stuffing (вероятность — по варианту).
         self.emulate_errors = False
 
 
@@ -336,8 +336,8 @@ class SerialConnection(QtCore.QObject):
             bytes(self._tx_buffer),
             emulate_errors=self.emulate_errors,
         )
-        # transmission.wire начинается с флага и содержит уже stuffed-тело
-        # (FCS заполнен до stuffing; эмуляция ошибки — в поле данных).
+        # transmission.wire: флаг + stuffed-тело; ошибка при эмуляции уже
+        # внесена в поток после stuffing (FCS до этого не пересчитывается).
         written = self.port.write(transmission.wire)
         if written != len(transmission.wire):
             self.error.emit("Send error: incomplete write.")

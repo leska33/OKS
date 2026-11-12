@@ -109,22 +109,6 @@ def _format_field(field: bytes) -> str:
     return ",".join(_binary_byte(value) for value in field)
 
 
-def _format_field_with_diff(original: bytes, current: bytes) -> str:
-    """Двоичное поле; изменённые биты подчёркнуты (эмуляция ошибки)."""
-    parts: list[str] = []
-    for old_byte, new_byte in zip(original, current, strict=True):
-        view: list[str] = []
-        for shift in range(7, -1, -1):
-            old_bit = (old_byte >> shift) & 1
-            new_bit = (new_byte >> shift) & 1
-            text = str(new_bit)
-            if old_bit != new_bit:
-                text = f"<u>{text}</u>"
-            view.append(text)
-        parts.append("".join(view))
-    return ",".join(parts)
-
-
 @dataclass(frozen=True)
 class Frame:
     """One fixed-size frame before bit stuffing."""
@@ -223,15 +207,43 @@ def _visible_status(flag: bytes, fields: tuple[bytes, ...], displayed: list[str]
     return " ".join((_format_field(flag), *displayed[:-1]))
 
 
-def _corrupt_data_field(data: bytes) -> bytes:
-    """Инвертировать один случайный бит в одном случайном байте поля данных."""
-    if not data:
-        return data
+def _count_html_bits(fragments: list[str]) -> int:
+    """Считать символы 0/1 в HTML-фрагментах статуса (теги пропускаются)."""
+    return sum(1 for fragment in fragments for char in fragment if char in "01")
+
+
+def _flip_msb_bit(data: bytes, bit_index: int) -> bytes:
+    """Инвертировать бит с индексом bit_index (нумерация MSB→LSB по байтам)."""
     mutable = bytearray(data)
-    byte_index = random.randrange(len(mutable))
-    bit_index = random.randrange(8)
-    mutable[byte_index] ^= 1 << bit_index
+    byte_index = bit_index // 8
+    shift = 7 - (bit_index % 8)
+    mutable[byte_index] ^= 1 << shift
     return bytes(mutable)
+
+
+def _underline_nth_html_bit(fragments: list[str], target_index: int) -> list[str]:
+    """Подчеркнуть ровно target_index-й бит (0/1) в HTML-представлении полей."""
+    remaining = target_index
+    updated: list[str] = []
+    for fragment in fragments:
+        out: list[str] = []
+        i = 0
+        while i < len(fragment):
+            char = fragment[i]
+            if char in "01":
+                if remaining == 0:
+                    out.append(f"<u>{char}</u>")
+                    remaining = -1
+                else:
+                    out.append(char)
+                    if remaining > 0:
+                        remaining -= 1
+                i += 1
+                continue
+            out.append(char)
+            i += 1
+        updated.append("".join(out))
+    return updated
 
 
 def encode_frame(
@@ -239,12 +251,12 @@ def encode_frame(
     *,
     emulate_errors: bool = False,
 ) -> FrameTransmission:
-    """Собрать кадр с FCS, при необходимости исказить данные, затем сделать stuffing.
+    """Собрать кадр: FCS → bit stuffing → (опционально) эмуляция ошибки.
 
     Порядок по заданию ЛР3:
-    1) заполнить FCS по полю данных;
-    2) бит-стаффинг применять к кадру с уже заполненным FCS;
-    3) эмуляция ошибки — один бит одного байта поля данных перед передачей.
+    1) заполнить поля и FCS по полю данных;
+    2) бит-стаффинг кадра с уже заполненным FCS;
+    3) эмуляция ошибки — один случайный бит уже после stuffing, перед передачей.
     """
     data = text if isinstance(text, bytes) else text.encode("utf-8")
     padded = data.ljust(MAX_DATA_SIZE, b"\x00") if len(data) < MAX_DATA_SIZE else data
@@ -263,38 +275,27 @@ def encode_frame(
     )
 
     before = _visible_status(START_FLAG, clean_fields)
-    # Строка «после stuffing» всегда показывает кадр с корректным FCS
-    # (стаффинг применяется к кадру с уже заполненным полем контроля).
-    _clean_stuffed, clean_displayed = _stuff_body(clean_fields)
+    # Строка Status «после stuffing»: кадр с корректным FCS (ещё без эмуляции).
+    stuffed_body, clean_displayed = _stuff_body(clean_fields)
     after = _visible_status(START_FLAG, clean_fields, clean_displayed)
 
     error_emulated = False
-    send_fields = clean_fields
+    # Эмуляция — только после stuffing: портим уже сформированный битовый поток.
     if emulate_errors and random.random() < ERROR_PROBABILITY:
-        corrupted_data = _corrupt_data_field(padded)
-        # FCS не пересчитывается: порча уже после канального кодирования.
-        send_fields = (
-            clean_fields[0],
-            clean_fields[1],
-            corrupted_data,
-            fcs,
-            reserved,
-        )
-        error_emulated = True
-        after_error = " ".join(
-            (
-                _format_field(START_FLAG),
-                _format_field(send_fields[0]),
-                _format_field(send_fields[1]),
-                _format_field_with_diff(padded, corrupted_data),
-                _format_field(fcs),
-            )
-        )
-        stuffed_body, _ = _stuff_body(send_fields)
+        # Только видимые в Status поля (без Reserved) и без padding-хвоста BitWriter.
+        visible_displayed = clean_displayed[:-1]
+        visible_bits = _count_html_bits(visible_displayed)
+        if visible_bits > 0:
+            flip_index = random.randrange(visible_bits)
+            stuffed_body = _flip_msb_bit(stuffed_body, flip_index)
+            error_displayed = _underline_nth_html_bit(clean_displayed, flip_index)
+            after_error = _visible_status(START_FLAG, clean_fields, error_displayed)
+            error_emulated = True
+        else:
+            after_error = before
     else:
         # Без эмуляции третья строка совпадает с содержимым до stuffing.
         after_error = before
-        stuffed_body = _clean_stuffed
 
     return FrameTransmission(
         wire=START_FLAG + stuffed_body,

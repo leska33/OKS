@@ -161,7 +161,7 @@ class SerialMessenger(QtWidgets.QWidget):
         self.baud_rate_choice.setCurrentIndex(-1)
         self.baud_rate_choice.setEnabled(False)
 
-        # ЛР3 вариант 1: эмуляция одиночной ошибки с вероятностью 10 %.
+        # ЛР3: разрешение/запрет эмуляции ошибок не затрагивает окна Input/Output.
         self.error_emulation_checkbox = QtWidgets.QCheckBox("Enable")
         self.error_emulation_checkbox.setChecked(False)
 
@@ -228,11 +228,10 @@ class SerialMessenger(QtWidgets.QWidget):
         baud_rate_box, baud_rate_layout = self._section("Baud rate")
         baud_rate_layout.addWidget(self.baud_rate_choice)
 
-        # Верхняя строка содержит настройки соединения, средняя — текстовый
-        # обмен, нижняя — диагностику сформированных пакетов.
         emulate_box, emulate_layout = self._section("Error emulation")
         emulate_layout.addWidget(self.error_emulation_checkbox)
-        emulate_box.setMinimumWidth(160)
+        # Только этот блок: ширина под заголовок, чтобы «Error emulation» не обрезался.
+        emulate_box.setMinimumWidth(150)
 
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(port_box)
@@ -461,9 +460,7 @@ class SerialMessenger(QtWidgets.QWidget):
 
     def _show_frame(self, transmission: FrameTransmission) -> None:
         """Показать последний кадр: до stuffing, после stuffing, после эмуляции ошибки."""
-        # Новый кадр заменяет предыдущий. Три строки по требованию ЛР3:
-        # 1) до бит-стаффинга, 2) после него, 3) после эмуляции ошибки
-        # (изменённые биты подчёркнуты; без ошибки строка совпадает с первой).
+        # Как в lab2: обычный шрифт интерфейса, строки через один <br> без пустых рядов.
         self.status_area.setHtml(
             f"{transmission.before}<br>"
             f"{transmission.after_html}<br>"
