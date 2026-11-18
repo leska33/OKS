@@ -207,43 +207,78 @@ def _visible_status(flag: bytes, fields: tuple[bytes, ...], displayed: list[str]
     return " ".join((_format_field(flag), *displayed[:-1]))
 
 
-def _count_html_bits(fragments: list[str]) -> int:
-    """Считать символы 0/1 в HTML-фрагментах статуса (теги пропускаются)."""
-    return sum(1 for fragment in fragments for char in fragment if char in "01")
-
-
-def _flip_msb_bit(data: bytes, bit_index: int) -> bytes:
-    """Инвертировать бит с индексом bit_index (нумерация MSB→LSB по байтам)."""
-    mutable = bytearray(data)
-    byte_index = bit_index // 8
-    shift = 7 - (bit_index % 8)
+def _flip_wire_bit(stuffed_body: bytes, wire_bit_index: int) -> bytes:
+    """Инвертировать один бит в теле кадра после stuffing (MSB→LSB в каждом байте)."""
+    mutable = bytearray(stuffed_body)
+    byte_index = wire_bit_index // 8
+    shift = 7 - (wire_bit_index % 8)
     mutable[byte_index] ^= 1 << shift
     return bytes(mutable)
 
 
-def _underline_nth_html_bit(fragments: list[str], target_index: int) -> list[str]:
-    """Подчеркнуть ровно target_index-й бит (0/1) в HTML-представлении полей."""
-    remaining = target_index
-    updated: list[str] = []
-    for fragment in fragments:
-        out: list[str] = []
-        i = 0
-        while i < len(fragment):
-            char = fragment[i]
-            if char in "01":
-                if remaining == 0:
-                    out.append(f"<u>{char}</u>")
-                    remaining = -1
-                else:
-                    out.append(char)
-                    if remaining > 0:
-                        remaining -= 1
-                i += 1
-                continue
-            out.append(char)
+def _wire_bit_index_of_data_bit(
+    fields: tuple[bytes, ...],
+    data_byte_index: int,
+    bit_in_byte: int,
+) -> int:
+    """Найти позицию бита поля Data в потоке после stuffing.
+
+    ``bit_in_byte``: 0 — старший бит байта, 7 — младший (как при передаче).
+    """
+    data_field_index = 2  # Type, Number, Data, FCS, Reserved
+    tracker = _FlagTracker()
+    wire_bit = 0
+    for field_index, field in enumerate(fields):
+        for byte_index, value in enumerate(field):
+            for bit_offset, bit in enumerate(_bits_of_byte(value)):
+                if (
+                    field_index == data_field_index
+                    and byte_index == data_byte_index
+                    and bit_offset == bit_in_byte
+                ):
+                    return wire_bit
+                wire_bit += 1
+                if tracker.consume(bit):
+                    wire_bit += 1  # вставленный stuffing-бит
+                    tracker.consume(STUFF_BIT)
+    raise ValueError("Data bit was not found in stuffed stream.")
+
+
+def _underline_data_bit_in_stuffed_field(
+    field_html: str,
+    data_byte_index: int,
+    bit_in_byte: int,
+) -> str:
+    """В HTML поля Data после stuffing показать испорченный бит (новое значение + <u>)."""
+    target = data_byte_index * 8 + bit_in_byte
+    remaining = target
+    out: list[str] = []
+    i = 0
+    while i < len(field_html):
+        # Уже подчёркнутые вставки stuffing пропускаем как целый тег.
+        if field_html.startswith("<u>", i):
+            end = field_html.find("</u>", i)
+            if end < 0:
+                out.append(field_html[i:])
+                break
+            out.append(field_html[i : end + 4])
+            i = end + 4
+            continue
+        char = field_html[i]
+        if char in "01":
+            if remaining == 0:
+                flipped = "1" if char == "0" else "0"  # модифицированное значение
+                out.append(f"<u>{flipped}</u>")
+                remaining = -1
+            else:
+                out.append(char)
+                if remaining > 0:
+                    remaining -= 1
             i += 1
-        updated.append("".join(out))
-    return updated
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
 
 
 def encode_frame(
@@ -251,12 +286,14 @@ def encode_frame(
     *,
     emulate_errors: bool = False,
 ) -> FrameTransmission:
-    """Собрать кадр: FCS → bit stuffing → (опционально) эмуляция ошибки.
+    """Собрать кадр: заполнение → FCS → bit stuffing → эмуляция ошибки.
 
-    Порядок по заданию ЛР3:
-    1) заполнить поля и FCS по полю данных;
-    2) бит-стаффинг кадра с уже заполненным FCS;
-    3) эмуляция ошибки — один случайный бит уже после stuffing, перед передачей.
+    Порядок (как сказал преподаватель):
+    1) заполнить поля кадра;
+    2) посчитать FCS по Data;
+    3) bit-stuffing кадра с уже заполненным FCS;
+    4) с вероятностью варианта испортить 1 бит в 1 байте только поля Data
+       уже в потоке после stuffing (FCS не пересчитывать).
     """
     data = text if isinstance(text, bytes) else text.encode("utf-8")
     padded = data.ljust(MAX_DATA_SIZE, b"\x00") if len(data) < MAX_DATA_SIZE else data
@@ -280,19 +317,21 @@ def encode_frame(
     after = _visible_status(START_FLAG, clean_fields, clean_displayed)
 
     error_emulated = False
-    # Эмуляция — только после stuffing: портим уже сформированный битовый поток.
-    if emulate_errors and random.random() < ERROR_PROBABILITY:
-        # Только видимые в Status поля (без Reserved) и без padding-хвоста BitWriter.
-        visible_displayed = clean_displayed[:-1]
-        visible_bits = _count_html_bits(visible_displayed)
-        if visible_bits > 0:
-            flip_index = random.randrange(visible_bits)
-            stuffed_body = _flip_msb_bit(stuffed_body, flip_index)
-            error_displayed = _underline_nth_html_bit(clean_displayed, flip_index)
-            after_error = _visible_status(START_FLAG, clean_fields, error_displayed)
-            error_emulated = True
-        else:
-            after_error = before
+    # Эмуляция — после stuffing: 1 случайный бит в 1 случайном байте только Data.
+    if emulate_errors and random.random() < ERROR_PROBABILITY and padded:
+        data_byte_index = random.randrange(len(padded))
+        bit_in_byte = random.randrange(8)
+        wire_bit = _wire_bit_index_of_data_bit(clean_fields, data_byte_index, bit_in_byte)
+        stuffed_body = _flip_wire_bit(stuffed_body, wire_bit)
+        # FCS не пересчитывается: имитация ошибки на линии после кодирования.
+        error_displayed = list(clean_displayed)
+        error_displayed[2] = _underline_data_bit_in_stuffed_field(
+            clean_displayed[2],
+            data_byte_index,
+            bit_in_byte,
+        )
+        after_error = _visible_status(START_FLAG, clean_fields, error_displayed)
+        error_emulated = True
     else:
         # Без эмуляции третья строка совпадает с содержимым до stuffing.
         after_error = before
