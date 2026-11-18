@@ -1,3 +1,5 @@
+"""COM-port access and framed background receiving for laboratory works No. 2-4."""
+
 from __future__ import annotations
 
 import sys
@@ -22,20 +24,26 @@ from .frame import MAX_DATA_SIZE, FrameDecoder, FrameTransmission, encode_frame
 
 __all__ = ("BAUD_RATES", "SerialConnection")
 
+
 BYTE_SIZE: Final[int] = 8
 PARITY: Final[str] = "N"
 STOP_BITS: Final[int] = 1
 
 TIMEOUT_SECONDS: Final[float] = 0.05
 
+# Нижняя граница write-timeout. Фактическое значение считается от скорости:
+# иначе на 110 бод или при незакрытой паре com0com запись срывается слишком рано.
 WRITE_TIMEOUT_SECONDS: Final[float] = 2.0
 
 RECEIVE_POLL_INTERVAL_MS: Final[int] = 20
 
+# Windows иногда отдаёт порт не сразу после close() — особенно com0com.
 OPEN_RETRY_COUNT: Final[int] = 6
 OPEN_RETRY_DELAY_SECONDS: Final[float] = 0.12
 
+
 def _is_port_busy_error(error: BaseException) -> bool:
+    """Permission/access-denied while the previous handle is still releasing."""
     text = str(error).lower()
     return any(
         marker in text
@@ -48,6 +56,7 @@ def _is_port_busy_error(error: BaseException) -> bool:
             "in use",
         )
     )
+
 
 BAUD_RATES: list[int] = [
     110,
@@ -63,12 +72,15 @@ BAUD_RATES: list[int] = [
     115200,
 ]
 
+
 class ReceiverThread(QtCore.QThread):
+    """Read a connected serial port in a background Qt thread."""
 
     data_received = QtCore.pyqtSignal(object)
     error_occurred = QtCore.pyqtSignal(str)
 
-    def __init__(self, port: Serial, owner: SerialConnection) -> None:
+    def __init__(self, port: Serial, owner: "SerialConnection") -> None:
+        """Create a receiver for an already-open serial port."""
         super().__init__()
 
         self.port = port
@@ -77,6 +89,9 @@ class ReceiverThread(QtCore.QThread):
 
     @override
     def run(self) -> None:
+        """Read available bytes until the thread is stopped."""
+        # Один декодер обслуживает весь срок жизни потока: его внутренний
+        # буфер хранит кадр, если COM-порт отдал его не целиком.
         decoder = FrameDecoder()
 
         while self._active:
@@ -84,8 +99,8 @@ class ReceiverThread(QtCore.QThread):
                 if not self.port.is_open:
                     return
 
-                                                                
-                                                                     
+                # ЛР4, приёмник CSMA/CD (те же 3 шага, без распараллеливания):
+                # 1) прослушивание канала.
                 if self._owner.emulate_multiple_access and is_channel_busy():
                     listen_until_idle()
                     if not self._active:
@@ -94,19 +109,23 @@ class ReceiverThread(QtCore.QThread):
                 waiting = self.port.in_waiting
 
                 if waiting:
+                    # read() возвращает только доступные сейчас байты. Граница
+                    # этого чтения не обязана совпадать с границей кадра.
                     raw_data = self.port.read(waiting)
                     jam_before = decoder.jam_events
                     frames = decoder.feed(raw_data)
                     jam_count = decoder.jam_events - jam_before
 
-                                                                                     
+                    # 2) обнаружение коллизии (Jam) -> 3) розыгрыш задержки.
                     if jam_count and self._owner.emulate_multiple_access:
-                        for attempt in range(1, jam_count + 1):
-                            wait_ms(backoff_delay_ms(attempt))
+                        for collision_n in range(1, jam_count + 1):
+                            wait_ms(backoff_delay_ms(collision_n))
                             if not self._active:
                                 return
 
                     for frame in frames:
+                        # В интерфейс передаётся только полностью собранный и
+                        # проверенный кадр, а не необработанный поток байтов.
                         self.data_received.emit(frame)
 
                 else:
@@ -125,15 +144,21 @@ class ReceiverThread(QtCore.QThread):
                 return
 
     def stop(self) -> None:
+        """Request thread termination."""
         self._active = False
         self.wait(1000)
 
+
 class SerialConnection(QtCore.QObject):
+    """Manage one selected serial port."""
 
     received = QtCore.pyqtSignal(str)
     frame_received = QtCore.pyqtSignal(object)
+    # Отдельный сигнал нужен окну-отправителю: он возникает только после
+    # успешной физической записи сформированного кадра в COM-порт.
     frame_sent = QtCore.pyqtSignal(object)
     error = QtCore.pyqtSignal(str)
+    # Не фатальные проблемы отправки (например, парный порт ещё не открыт).
     warning = QtCore.pyqtSignal(str)
 
     def __init__(
@@ -141,6 +166,7 @@ class SerialConnection(QtCore.QObject):
         port_name: str,
         baud_rate: int,
     ) -> None:
+        """Store the selected COM port and baud rate."""
         super().__init__()
 
         self.port_name = port_name
@@ -148,16 +174,23 @@ class SerialConnection(QtCore.QObject):
 
         self.port: Serial | None = None
         self.receiver: ReceiverThread | None = None
+        # Поле данных фиксированной длины (остаток в кадре ≤ 100 байт).
+        # Символы копятся и уходят на линию только когда поле заполнено.
         self._tx_buffer = bytearray()
         self._tx_characters = 0
-                                                                                   
+        # ЛР3: эмуляция одиночной ошибки после bit-stuffing (вероятность — по варианту).
         self.emulate_errors = False
-                                                                                 
+        # ЛР4: эмуляция множественного доступа (CSMA/CD, вариант 1).
         self.emulate_multiple_access = False
         self._sending = False
 
     @staticmethod
     def available_ports() -> Generator[str, None, None]:
+        """Yield system COM-port names.
+
+        pyserial иногда не видит порты com0com через SetupAPI, хотя они есть
+        в ``HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM`` и успешно открываются.
+        """
         found: set[str] = {item.device for item in list_ports.comports()}
 
         if sys.platform == "win32":
@@ -187,13 +220,16 @@ class SerialConnection(QtCore.QObject):
         yield from sorted(found, key=sort_key)
 
     def __enter__(self) -> Self:
+        """Open the selected port and start receiving."""
         port_name = self.port_name
+        # На Windows для COM10+ нужен префикс \\.\ ; для COM3/COM4 он тоже безопасен.
         if sys.platform == "win32" and port_name.upper().startswith("COM"):
             port_name = "\\\\.\\" + port_name
 
         last_error: BaseException | None = None
         for attempt in range(OPEN_RETRY_COUNT):
             try:
+                # Кадр ~100+ байт; на низкой скорости нужно больше 0.25 с.
                 write_timeout = max(
                     WRITE_TIMEOUT_SECONDS,
                     (250 * 11) / max(int(self.baud_rate), 1) + 1.0,
@@ -240,6 +276,7 @@ class SerialConnection(QtCore.QObject):
 
         self.receiver = ReceiverThread(self.port, self)
 
+        # Приёмник работает в фоне; Qt безопасно передаст сигнал в поток GUI.
         self.receiver.data_received.connect(self._handle_frame)
 
         self.receiver.error_occurred.connect(self._handle_receiver_error)
@@ -252,12 +289,17 @@ class SerialConnection(QtCore.QObject):
         self,
         message: str,
     ) -> None:
+        """Forward a real serial-port failure."""
         self.error.emit(message)
 
     def _handle_frame(self, frame: object) -> None:
+        """Forward a recognized frame and its decoded data to the UI."""
+        # ReceiverThread only emits Frame instances; keeping the conversion
+        # here makes the Qt boundary explicit and protects the UI from bytes.
         data = getattr(frame, "data", None)
         if not isinstance(data, bytes):
             return
+        # frame.data уже не содержит padding-нули и stuffing-биты.
         self.received.emit(data.decode("utf-8"))
         self.frame_received.emit(frame)
 
@@ -265,6 +307,7 @@ class SerialConnection(QtCore.QObject):
         self,
         character: str,
     ) -> FrameTransmission | None:
+        """Add one character to the fixed packet currently being assembled."""
         if self.port is None or not self.port.is_open:
             self.error.emit("COM port is not open.")
             return None
@@ -278,6 +321,8 @@ class SerialConnection(QtCore.QObject):
                 raise ValueError("Character does not fit into the data field.")
 
             if len(self._tx_buffer) + len(data) > MAX_DATA_SIZE:
+                # Многобайтный UTF-8-символ может не поместиться в остаток
+                # поля. Сначала отправляем накопленный кадр, затем начнём новый.
                 transmission = self._send_full_packet()
                 if transmission is None:
                     return None
@@ -285,10 +330,13 @@ class SerialConnection(QtCore.QObject):
             self._tx_buffer.extend(data)
             self._tx_characters += 1
             if len(self._tx_buffer) == MAX_DATA_SIZE:
+                # Поле данных заполнено → кадр в пределах лимита 100 байт (до stuffing).
                 return self._send_full_packet()
             return None
 
         except SerialTimeoutException:
+            # Типичный случай com0com: второй конец пары ещё не открыт.
+            # Соединение не рвём — достаточно открыть парный порт во 2-м окне.
             self.warning.emit(
                 "Send error: write timeout.\n\n"
                 "Парный COM-порт не принимает данные. Откройте второе окно "
@@ -308,14 +356,15 @@ class SerialConnection(QtCore.QObject):
             return None
 
     def set_emulate_errors(self, enabled: bool) -> None:
-                                                                            
+        """Разрешить или запретить эмуляцию ошибок перед передачей кадра."""
         self.emulate_errors = enabled
 
     def set_emulate_multiple_access(self, enabled: bool) -> None:
-                                                                            
+        """Разрешить или запретить эмуляцию множественного доступа (ЛР4)."""
         self.emulate_multiple_access = enabled
 
     def _send_full_packet(self) -> FrameTransmission | None:
+        """Serialize and write the currently full (or overflowed) data field."""
         if self.port is None or not self._tx_buffer:
             return None
         if self._sending:
@@ -327,14 +376,16 @@ class SerialConnection(QtCore.QObject):
             self._sending = False
 
     def _send_full_packet_unlocked(self) -> FrameTransmission | None:
+        """Фактическая запись кадра (под флагом _sending)."""
         if self.port is None or not self._tx_buffer:
             return None
         transmission = encode_frame(
             bytes(self._tx_buffer),
             emulate_errors=self.emulate_errors,
         )
+        # transmission.wire: флаг + stuffed-тело; ошибка ЛР3 уже после stuffing.
         if self.emulate_multiple_access:
-                                                                                      
+            # ЛР4: CSMA/CD - listen -> коллизия по байту -> Jam -> backoff.
             port = self.port
 
             def _write(chunk: bytes) -> int:
@@ -350,7 +401,6 @@ class SerialConnection(QtCore.QObject):
                     "CSMA/CD: кадр не передан после повторных коллизий "
                     f"(попыток: {result.attempts})."
                 )
-                                                                              
                 self.frame_sent.emit(transmission)
                 self._tx_buffer.clear()
                 self._tx_characters = 0
@@ -360,8 +410,12 @@ class SerialConnection(QtCore.QObject):
             if written != len(transmission.wire):
                 self.error.emit("Send error: incomplete write.")
                 return None
+        # Отправитель показывает свой кадр по этому событию, не ожидая, пока
+        # он пройдёт по кабелю и будет декодирован вторым экземпляром программы.
         self.frame_sent.emit(transmission)
         self._tx_buffer.clear()
+        # Счётчик нужен только для диагностического сообщения; данные уже
+        # отправлены, поэтому начинать следующий пакет нужно с нуля.
         self._tx_characters = 0
         return transmission
 
@@ -371,6 +425,7 @@ class SerialConnection(QtCore.QObject):
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        """Stop receiving and close the serial port."""
         if self.receiver is not None:
             self.receiver.stop()
             self.receiver = None
@@ -383,6 +438,9 @@ class SerialConnection(QtCore.QObject):
                 pass
 
         self.port = None
+        # Дать Windows/com0com время освободить имя порта перед повторным open.
         time.sleep(OPEN_RETRY_DELAY_SECONDS)
+        # Неполный пакет намеренно не отправляется при закрытии: условие
+        # исходной реализации требует передачи только заполненного буфера.
         self._tx_buffer.clear()
         self._tx_characters = 0
