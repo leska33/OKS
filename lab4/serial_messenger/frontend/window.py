@@ -715,9 +715,6 @@ class SerialMessenger(QtWidgets.QWidget):
             }
 
             """)
-        self.status_area.document().setDefaultStyleSheet(
-            "u { text-decoration: underline; font-weight: bold; }"
-        )
 
     @override
     def closeEvent(

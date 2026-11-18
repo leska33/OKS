@@ -178,10 +178,11 @@ class SerialConnection(QtCore.QObject):
         # Символы копятся и уходят на линию только когда поле заполнено.
         self._tx_buffer = bytearray()
         self._tx_characters = 0
-        # ЛР3: эмуляция одиночной ошибки после bit-stuffing (вероятность — по варианту).
+        # ЛР3: эмуляция 1 бита в 1 байте Data после stuffing (вероятность — по варианту).
         self.emulate_errors = False
         # ЛР4: эмуляция множественного доступа (CSMA/CD, вариант 1).
         self.emulate_multiple_access = False
+        # Защита от повторного входа в отправку во время wait_ms (processEvents).
         self._sending = False
 
     @staticmethod
@@ -383,7 +384,8 @@ class SerialConnection(QtCore.QObject):
             bytes(self._tx_buffer),
             emulate_errors=self.emulate_errors,
         )
-        # transmission.wire: флаг + stuffed-тело; ошибка ЛР3 уже после stuffing.
+        # transmission.wire: Flag + тело после stuffing; при эмуляции испорчен
+        # 1 бит поля Data в этом потоке (FCS не пересчитывается).
         if self.emulate_multiple_access:
             # ЛР4: CSMA/CD - listen -> коллизия по байту -> Jam -> backoff.
             port = self.port
